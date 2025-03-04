@@ -228,6 +228,7 @@ local function process_request(requests, request, variables, callback)
 
   if not check_executable(parsed_request.cmd) then return callback(false, 0, parsed_request.show_icon_line_number) end
 
+  if CONFIG.options.debug then vim.print(("Running command: %s"):format(table.concat(parsed_request.cmd, " "))) end
   vim.system(parsed_request.cmd, {
     text = true,
     timeout = CONFIG.get().request_timeout,
