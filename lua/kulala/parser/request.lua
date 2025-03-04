@@ -454,6 +454,9 @@ local function build_grpc_command(request)
     _ = (value and #value > 1) and table.insert(request.cmd, value)
   end)
 
+  process_auth_headers(request)
+  process_headers(request)
+
   _ = grpc_command.address and table.insert(request.cmd, grpc_command.address)
   _ = grpc_command.command and table.insert(request.cmd, grpc_command.command)
   _ = grpc_command.symbol and table.insert(request.cmd, grpc_command.symbol)
