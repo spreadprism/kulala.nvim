@@ -455,11 +455,7 @@ local function build_grpc_command(request)
   end)
 
   process_auth_headers(request)
-  process_protocol(request)
   process_headers(request)
-  process_body(request)
-  process_cookies(request)
-  process_options(request)
 
   _ = grpc_command.address and table.insert(request.cmd, grpc_command.address)
   _ = grpc_command.command and table.insert(request.cmd, grpc_command.command)
