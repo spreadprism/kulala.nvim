@@ -48,6 +48,13 @@ M.default_global_keymaps = {
     end,
     ft = { "http", "rest" },
   },
+  ["Manage Auth Config"] = {
+    "<leader>Ru",
+    function()
+      require("lua.kulala.ui.auth_manager").open_auth_config()
+    end,
+    ft = { "http", "rest" },
+  },
   ["Send request"] = {
     "<leader>Rs",
     function()
@@ -172,6 +179,12 @@ M.default_kulala_keymaps = {
       require("kulala.ui").show_stats()
     end,
   },
+  ["Show report"] = {
+    "R",
+    function()
+      require("kulala.ui").show_report()
+    end,
+  },
   ["Next response"] = {
     "]",
     function()
@@ -182,6 +195,45 @@ M.default_kulala_keymaps = {
     "[",
     function()
       require("kulala.ui").show_previous()
+    end,
+  },
+  ["Jump to response"] = {
+    "<CR>",
+    function()
+      require("kulala.ui").jump_to_response()
+    end,
+    mode = { "n", "v" },
+    desc = "also: Send WS message for WS connections",
+  },
+  ["Clear responses history"] = {
+    "X",
+    function()
+      require("kulala.ui").clear_responses_history()
+    end,
+  },
+  ["Send WS message"] = {
+    "<S-CR>",
+    function()
+      require("kulala.cmd.websocket").send()
+    end,
+    mode = { "n", "v" },
+  },
+  ["Close WS connection"] = {
+    "<C-c>",
+    function()
+      require("kulala.cmd.websocket").close()
+    end,
+  },
+  ["Show help"] = {
+    "?",
+    function()
+      require("kulala.ui").show_help()
+    end,
+  },
+  ["Show news"] = {
+    "g?",
+    function()
+      require("kulala.ui").show_news()
     end,
   },
   ["Close"] = {
@@ -237,7 +289,7 @@ local function create_ft_autocommand(ft, maps)
   })
 end
 
-M.setup_kulala_keymaps = function(buf)
+M.get_kulala_keymaps = function()
   local config = require("kulala.config")
   local config_kulala_keymaps = config.options.kulala_keymaps
 
@@ -247,14 +299,20 @@ M.setup_kulala_keymaps = function(buf)
       and vim.tbl_extend("force", M.default_kulala_keymaps, config_kulala_keymaps)
     or M.default_kulala_keymaps
 
-  vim.iter(config_kulala_keymaps or {}):each(function(name, map)
+  return config_kulala_keymaps
+end
+
+M.setup_kulala_keymaps = function(buf)
+  local keymaps = M.get_kulala_keymaps() or {}
+
+  vim.iter(keymaps):each(function(name, map)
     if map then
       map.desc = map.desc or name
       set_keymap(map, buf)
     end
   end)
 
-  return config_kulala_keymaps
+  return keymaps
 end
 
 M.setup_global_keymaps = function()

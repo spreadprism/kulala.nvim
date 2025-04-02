@@ -5,14 +5,22 @@
 node_modules
 package-lock.json
 
+
 *graphql-schema.json
 
 http-client.env.json
 !/schemas/http-client.env.json
-!/tests/functional/requests/http-client.env.json
+!/tests/**/http-client*.json
+!/docs/**/*.json
+
+!/doc/tags
 
 /http-examples
 *.http
+!/docs/**/*.http
+!/tests/**/*.http
 !/tests/functional/requests/*.http
 
 todo.md
+selene.toml
+neovim.yml

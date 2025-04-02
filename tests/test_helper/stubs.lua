@@ -4,7 +4,7 @@ local fs = require("kulala.utils.fs")
 local h = require("test_helper.ui")
 
 local Jobstart = { id = "Jobstart", jobs = {} }
-local System = { id = "System", code = 0, signal = 0, jobs = {} }
+local System = { id = "System", code = 0, signal = 0, pid = 0, closing = false, jobs = {}, log = {}, async = false }
 local Curl = { url_mappings = {}, paths = {}, requests = {}, requests_no = 0, last_request_body_path = "" }
 local Input = { variables = {} }
 local Notify = { messages = {} }
@@ -154,7 +154,7 @@ end
 function Curl.request(job)
   local cmd = job.args.cmd
   local url = vim.split(cmd[#cmd], "?")[1]
-  local mappings = vim.tbl_deep_extend("force", Curl.url_mappings["*"], Curl.url_mappings[url] or {})
+  local mappings = vim.tbl_deep_extend("force", Curl.url_mappings["*"] or {}, Curl.url_mappings[url] or {})
 
   if not mappings then return end
 
@@ -162,8 +162,9 @@ function Curl.request(job)
     job.opts.on_stdout = mappings.stats
     job.opts.on_stderr = mappings.errors
   else
-    job.stdout = mappings.stdout or mappings.stats
-    job.stderr = mappings.errors
+    job.code = mappings.code or 0
+    job.stdout = mappings.stdout or mappings.stats or ""
+    job.stderr = mappings.errors or ""
   end
 
   local curl_flags = parse_curl_cmd(cmd)
@@ -185,6 +186,9 @@ function Curl.reset()
   vim.iter(Curl.paths):each(function(path)
     vim.uv.fs_unlink(path)
   end)
+
+  Curl.paths = {}
+  Curl.url_mappings = {}
 end
 
 function Jobstart.stub(cmd, opts)
@@ -237,6 +241,10 @@ end
 function System.stub(cmd, opts, on_exit)
   System.cmd = cmd
   System.opts = opts
+
+  System.write = opts.write
+  System.kill = opts.kill
+
   System.on_exit = on_exit
 
   System._system = System._system or vim.system
@@ -248,10 +256,13 @@ end
 function System.reset()
   vim.system = System._system
   System.jobs = {}
+  System.log = {}
+  System.async = false
 end
 
 function System.run(cmd, opts, on_exit)
   System.args = { cmd = cmd, opts = opts, on_exit = on_exit }
+  System.args.opts.on_exit = on_exit
 
   if not job_cmd_match(cmd, System.cmd) then return System._system(cmd, opts, on_exit) end
 
@@ -269,10 +280,18 @@ function System.run(cmd, opts, on_exit)
 
   _ = opts.stdout and opts.stdout(_, System.stdout)
   _ = opts.stderr and opts.stderr(_, System.stderr)
-  _ = on_exit and on_exit(System.completed)
+  _ = on_exit and not System.async and on_exit(System.completed)
 
   System.jobs[job_id] = nil
   return System
+end
+
+function System.is_closing()
+  return System.closing
+end
+
+function System.add_log(entry)
+  table.insert(System.log, entry)
 end
 
 function System.wait(_, timeout, predicate)

@@ -1,3 +1,4 @@
+local Json = require("kulala.utils.json")
 local Logger = require("kulala.logger")
 
 local M = {}
@@ -63,13 +64,17 @@ end
 
 ---Either returns the absolute path if the path is already absolute or
 ---joins the path with the current buffer directory
-M.get_file_path = function(path)
-  path = vim.fn.expand(path)
+---@param path string
+---@param root string|nil -- root directory
+M.get_file_path = function(path, root)
+  local ex_path = vim.fn.expand(path, true)
+  path = ex_path ~= "" and ex_path or path
+  root = root and vim.fn.fnamemodify(root, ":h")
 
   if M.is_absolute_path(path) then return path end
   if path:sub(1, 2) == "./" or path:sub(1, 2) == ".\\" then path = path:sub(3) end
 
-  return M.join_paths(M.get_current_buffer_dir(), path)
+  return M.join_paths(root or M.get_current_buffer_dir(), path)
 end
 
 -- This is mainly used for determining if the current buffer is a non-http file
@@ -153,13 +158,10 @@ end
 --- @return boolean
 --- @usage local p = fs.write_file('Makefile', 'all: \n\t@echo "Hello World"')
 M.write_file = function(filename, content, append)
-  local f
-  if append then
-    f = io.open(filename, "a")
-  else
-    f = io.open(filename, "w")
-  end
+  local f, mode
+  mode = append and "a" or "w"
 
+  f = io.open(filename, mode)
   if not f then return false end
 
   f:write(content)
@@ -203,6 +205,7 @@ M.get_plugin_tmp_dir = function()
   local cache = vim.fn.stdpath("cache")
   ---@cast cache string
   local dir = M.join_paths(cache, "kulala")
+
   M.ensure_dir_exists(dir)
   return dir
 end
@@ -214,8 +217,6 @@ end
 
 M.get_tmp_scripts_build_dir = function()
   local dir = M.join_paths(M.get_plugin_tmp_dir(), "scripts", "build")
-  M.ensure_dir_exists(dir)
-
   return dir
 end
 
@@ -247,8 +248,8 @@ M.delete_files_in_directory = function(dir)
 
       if not name then break end
 
-      -- Only delete files, not directories except .gitingore
-      if type == "file" and not name:match(".gitignore$") then
+      -- Only delete files, not directories except .*
+      if type == "file" and not name:match("^%.") then
         local filepath = M.join_paths(dir, name)
         local success, err = vim.uv.fs_unlink(filepath)
 
@@ -317,6 +318,7 @@ end
 ---@return string|nil
 ---@usage local p = fs.read_file('Makefile')
 M.read_file = function(filename, is_binary)
+  if not filename then return end
   local read_mode = is_binary and "rb" or "r"
 
   filename = M.get_file_path(filename)
@@ -325,10 +327,36 @@ M.read_file = function(filename, is_binary)
   if not f then return end
 
   local content = f:read("*a")
+  if not content then return end
+
   content = is_binary and content or content:gsub("\r\n", "\n")
   f:close()
 
   return content
+end
+
+M.read_json = function(filename)
+  local content = M.read_file(filename)
+  if not content then return end
+
+  local status, result = pcall(vim.json.decode, content, { object = true, array = true })
+  if not status then return Logger.error("Error decoding JSON file: " .. filename .. ": " .. result) end
+
+  return result
+end
+
+---Write JSON to file
+---@param filename string
+---@param data table
+---@param format boolean|nil -- format the JSON with jq
+M.write_json = function(filename, data, format)
+  local content = vim.json.encode(data)
+  if not content then return end
+
+  content = format and Json.format(content) or content
+
+  content = content:gsub("\\/", "/"):gsub('\\"', '"')
+  return M.write_file(filename, content)
 end
 
 ---@param content string

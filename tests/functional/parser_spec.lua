@@ -81,7 +81,24 @@ describe("requests", function()
         })
       end)
 
-      it("skips reequests comented out with # ", function()
+      it("processes request only if it has not been processed yet", function()
+        h.create_buf(
+          ([[
+            GET https://typicode.com/todos?date=2020-01-01 12:34:56
+      ]]):to_table(true),
+          "test.http"
+        )
+
+        result = parser.parse() or {}
+        assert.is_same("https://typicode.com/todos?date=2020-01-01%2012%3A34%3A56", result.url)
+
+        result.processed = true
+
+        result = parser.parse({ result })
+        assert.is_same("https://typicode.com/todos?date=2020-01-01%2012%3A34%3A56", result.url)
+      end)
+
+      it("skips requests commented out with # ", function()
         h.create_buf(
           ([[
             # @name SIMPLE REQUEST
@@ -94,6 +111,125 @@ describe("requests", function()
 
         result = parser.parse() or {}
         assert.is.same({}, result)
+      end)
+
+      it("skips lines commented out with # ", function()
+        h.create_buf(
+          ([[
+            # @name SIMPLE REQUEST
+            POST https://httpbingo.org/simple
+
+            {
+              # "skip": "true",
+              "test": "value"
+            }
+      ]]):to_table(true),
+          "test.http"
+        )
+
+        result = parser.parse() or {}
+        assert.is_same(result.body:gsub("\n", ""), '{"test": "value"}')
+      end)
+
+      it("skips lines commented out with //", function()
+        h.create_buf(
+          ([[
+            # @name SIMPLE REQUEST
+            POST https://httpbingo.org/simple
+
+            {
+              // "skip": "true",
+              "test": "value"
+            }
+      ]]):to_table(true),
+          "test.http"
+        )
+
+        result = parser.parse() or {}
+        assert.is_same(result.body:gsub("\n", ""), '{"test": "value"}')
+      end)
+
+      describe("processes url", function()
+        local http_buf = h.create_buf({}, "test_url.http")
+
+        local assert_url = function(lines, method, url, version)
+          h.set_buf_lines(http_buf, lines)
+
+          result = parser.parse() or {}
+          assert.is.same(method, result.method)
+          assert.is.same(url, result.url)
+          assert.is.same(version, result.http_version)
+
+          return result
+        end
+
+        -- [method required-whitespace] request-target [required-whitespace http-version]
+        it("processes request line", function()
+          -- full
+          assert_url({
+            "POST https://httpbin.org:8080/simple?query=value#fragment HTTP/1.1",
+          }, "POST", "https://httpbin.org:8080/simple?query=value#fragment", "1.1")
+
+          --- no method, default GET
+          assert_url({ "https://httpbin.org/simple HTTP/1.1" }, "GET", "https://httpbin.org/simple", "1.1")
+
+          --- no version
+          assert_url({ "https://httpbin.org/simple" }, "GET", "https://httpbin.org/simple")
+
+          --- no scheme
+          assert_url({ "httpbin.org/simple" }, "GET", "httpbin.org/simple")
+
+          --- origin form: absolute-path [‘?’ query] [‘#’ fragment]
+          assert_url(
+            ([[
+            GET /api/get?query=value#fragment HTTP/2
+            Host: https://httpbin.org:443
+          ]]):to_table(true),
+            "GET",
+            "https://httpbin.org:443/api/get?query=value#fragment",
+            "2"
+          )
+
+          --- no scheme
+          assert_url(
+            ([[
+            GET /api/get?query=value#fragment HTTP/2
+            Host: httpbin.org
+          ]]):to_table(true),
+            "GET",
+            "httpbin.org/api/get?query=value#fragment",
+            "2"
+          )
+
+          --- asterisk form
+          result = assert_url(
+            ([[
+            OPTIONS * HTTP/1.1
+            Host: http://example.com:8080
+          ]]):to_table(true),
+            "OPTIONS",
+            "http://example.com:8080",
+            "1.1"
+          )
+          assert.is.same("*", result.request_target)
+
+          assert_url({ "127.0.0.1:80" }, "GET", "127.0.0.1:80")
+          assert_url({ "http://[::1]" }, "GET", "http://[::1]")
+
+          --- muiltiline URL
+          assert_url(
+            ([[
+              GET http://example.com:8080
+                  /api
+                  /html
+                  /get
+                  ?id=123
+                  &value=content
+          ]]):to_table(true),
+            "GET",
+            "http://example.com:8080/api/html/get?id=123&value=content"
+          )
+        end)
       end)
 
       it("processes headers", function()
@@ -304,6 +440,100 @@ describe("requests", function()
             { file = "./response_overwrite.txt", overwrite = true },
           },
         })
+      end)
+
+      describe("it processes run and import directives", function()
+        local doc_parser = require("kulala.parser.document")
+
+        -- import|run filename_in_cwd|relative_path|absolute_path
+        it("run - filename", function()
+          h.create_buf(
+            ([[
+            POST https://httpbin.org/post HTTP/1.1
+            Content-Type: text/plain
+
+            ###
+            run tests/functional/requests/advanced_A.http
+          ]]):to_table(true),
+            "test.http"
+          )
+
+          result = select(2, doc_parser.get_document()) or {}
+          assert.is_same("https://httpbin.org/post", result[1].url)
+          assert.is_same("https://httpbin.org/advanced_1", result[2].url)
+          assert.is_same("https://httpbin.org/advanced_2", result[3].url)
+        end)
+
+        it("import/run - filename", function()
+          h.create_buf(
+            ([[
+            import tests/functional/requests/advanced_A.http
+
+            POST https://httpbin.org/post HTTP/1.1
+            Content-Type: text/plain
+
+            ###
+            run #Request 1
+            run #POST https://httpbin.org/advanced_2
+          ]]):to_table(true),
+            "test.http"
+          )
+
+          result = select(2, doc_parser.get_document()) or {}
+
+          assert.is_same("https://httpbin.org/post", result[1].url)
+          assert.is_same("https://httpbin.org/advanced_1", result[2].url)
+          assert.is_same("https://httpbin.org/advanced_2", result[3].url)
+        end)
+
+        it("run - replaces variables", function()
+          -- run #GET request with two vars (@host=example.com, @user=userName)
+          h.create_buf(
+            ([[
+            import tests/functional/requests/advanced_A.http
+
+            POST https://httpbin.org/post HTTP/1.1
+            Content-Type: text/plain
+
+            ###
+            run #Request 1 (@foobar=new_bar, @ENV_USER = new_username)
+            run #POST https://httpbin.org/advanced_2
+          ]]):to_table(true),
+            "test.http"
+          )
+
+          result = doc_parser.get_document() or {}
+
+          assert.is_same("new_bar", result["foobar"])
+          assert.is_same("new_username", result["ENV_USER"])
+          assert.is_same("project_name", result["ENV_PROJECT"])
+        end)
+
+        it("imports and runs nested imports/requests", function()
+          h.create_buf(
+            ([[
+            POST https://httpbin.org/request_0
+            Content-Type: text/plain
+            ###
+            run import.http
+          ]]):to_table(true),
+            h.expand_path("requests/simple.http")
+          )
+
+          _, result = doc_parser.get_document()
+
+          assert.is_same(4, #result)
+
+          local function assert_url(no, url, file)
+            assert.is_same(url, result[no].url)
+            assert.match(file, result[no].file)
+          end
+
+          assert_url(1, "https://httpbin.org/request_0", "simple.http")
+          assert_url(2, "https://httpbin.org/advanced_b", "advanced_B.http")
+          assert_url(3, "https://httpbin.org/advanced_1", "advanced_A.http")
+          assert_url(4, "https://httpbin.org/imported", "import.http")
+        end)
       end)
     end)
   end)

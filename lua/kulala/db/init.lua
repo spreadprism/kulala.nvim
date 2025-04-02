@@ -1,4 +1,7 @@
 local CONFIG = require("kulala.config")
+local FS = require("kulala.utils.fs")
+local GLOBAL = require("kulala.globals")
+local Table = require("kulala.utils.table")
 
 local M = {}
 
@@ -8,15 +11,19 @@ M.data = nil
 ---@field id string
 ---@field url string
 ---@field method string
----@field status number
+---@field status boolean
+---@field code number -- request command code
+---@field response_code number -- http response code
 ---@field duration number
----@field time string
+---@field time number
 ---@field body string
 ---@field headers string
 ---@field errors string
----@field stats string
+---@field stats table|string
 ---@field script_pre_output string
 ---@field script_post_output string
+---@field assert_output table
+---@field assert_status boolean
 ---@field buf number
 ---@field buf_name string
 ---@field line number
@@ -27,6 +34,7 @@ M.data = nil
 ---@field replay Request|nil -- previous request stored for replay
 M.global_data = {
   current_response_pos = nil, -- index of current response shown in UI
+  previous_response_pos = nil, -- index of previous response shown in UI
   responses = {}, -- history of responses
   replay = nil,
 }
@@ -115,5 +123,29 @@ end
 M.find_unique = function(key)
   return M.find_many()[key]
 end
+
+local mt_settings
+
+mt_settings = {
+  __index = {
+    write = function(self, update)
+      Table.merge("force", self, update or {})
+      FS.write_json(GLOBAL.SETTINGS_FILE, vim.deepcopy(self))
+      return self
+    end,
+  },
+
+  create = function()
+    FS.ensure_dir_exists(vim.fn.fnamemodify(GLOBAL.SETTINGS_FILE, ":h"))
+    return FS.write_json(GLOBAL.SETTINGS_FILE, {}) and {}
+  end,
+
+  read = function(self)
+    local settings = FS.read_json(GLOBAL.SETTINGS_FILE) or self:create()
+    return setmetatable(settings, mt_settings)
+  end,
+}
+
+M.settings = mt_settings:read()
 
 return M

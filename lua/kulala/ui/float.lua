@@ -7,10 +7,16 @@ local FLOAT_POSITION = {
 }
 
 ---@class FloatOpts
+---@field title string? @Title of the floating window
+---@field buf_name string? @Name of the buffer
 ---@field contents string[] @Contents of the buffer
 ---@field ft string? @Filetype of the buffer
 ---@field focusable boolean? @Whether the window is focusable
 ---@field position FloatPosition @Position of the floating window
+---@field width integer? @Width of the floating window
+---@field height integer? @Height of the floating window
+---@field zindex integer? @Z-index of the floating window
+---@field close_keymaps string[]? @List of keymaps to close the floating window
 
 ---Creates a floating window with the contents passed via opts
 ---@param opts FloatOpts
@@ -18,6 +24,7 @@ local FLOAT_POSITION = {
 M.create = function(opts)
   -- Create a new buffer
   local buf = vim.api.nvim_create_buf(false, true)
+  _ = opts.buf_name and vim.api.nvim_buf_set_name(buf, opts.buf_name)
 
   local win_config_relative = "editor"
 
@@ -60,21 +67,74 @@ M.create = function(opts)
 
   -- Define the floating window configuration
   local win_config = {
+    title = opts.title or "",
     relative = win_config_relative,
-    width = win_width,
-    height = win_height,
+    width = opts.width or win_width,
+    height = opts.height or win_height,
     row = row,
     col = col,
     style = "minimal",
     border = "rounded",
     focusable = opts.focusable or false,
+    zindex = opts.zindex or 100,
   }
 
   -- Create the floating window with the buffer
   local win = vim.api.nvim_open_win(buf, opts.focusable or false, win_config)
 
+  -- Set the keymaps to close the floating window
+  vim.iter(opts.close_keymaps or {}):each(function(key)
+    vim.keymap.set("n", key, function()
+      vim.api.nvim_win_close(win, true)
+      vim.api.nvim_buf_delete(buf, { force = true })
+    end, { buffer = buf, noremap = true, silent = true })
+  end)
+
   -- Return the window and buffer IDs
   return win, buf
+end
+
+M.create_window_footer = function(buf_id, win_id, text, opts)
+  buf_id = buf_id or 0
+  win_id = win_id or 0
+  opts = opts or {}
+
+  local win_height = vim.api.nvim_win_get_height(win_id)
+  local win_width = vim.api.nvim_win_get_width(win_id)
+
+  local buf = vim.api.nvim_create_buf(false, true)
+  local buf_name = opts.buf_name or "kulala://footer"
+
+  _ = vim.fn.bufnr(buf_name) > -1 and vim.api.nvim_buf_delete(vim.fn.bufnr(buf_name), { force = true })
+  vim.api.nvim_buf_set_name(buf, buf_name)
+
+  text = (" "):rep(win_width - #text) .. text
+  vim.api.nvim_buf_set_lines(buf, 0, -1, true, { text })
+
+  if opts.hl_group then vim.api.nvim_buf_add_highlight(buf, -1, opts.hl_group, 0, 0, -1) end
+
+  local float_win = vim.api.nvim_open_win(buf, false, {
+    relative = "win",
+    win = win_id,
+    width = win_width,
+    height = 1,
+    row = win_height - 2,
+    col = 0,
+    style = "minimal",
+    focusable = false,
+    zindex = 100,
+    border = opts.border or "none",
+  })
+
+  vim.api.nvim_create_autocmd({ "BufLeave", "WinLeave" }, {
+    buffer = buf_id,
+    once = true,
+    callback = function()
+      _ = vim.api.nvim_win_is_valid(float_win) and vim.api.nvim_win_close(float_win, true)
+    end,
+  })
+
+  return float_win, buf
 end
 
 return M

@@ -2,8 +2,43 @@ local DB = require("kulala.db")
 local FS = require("kulala.utils.fs")
 local Logger = require("kulala.logger")
 local PARSER_UTILS = require("kulala.parser.utils")
+local Table = require("kulala.utils.table")
 
 local M = {}
+---@class DocumentRequest
+---@field metadata table<{name: string, value: string}>
+---@field variables DocumentVariables
+
+---@field method string
+---@field url string
+---@field request_target string|nil
+---@field http_version string
+
+---@field headers table<string, string>
+---@field headers_raw table<string, string>
+---@field cookie string
+
+---@field body string
+---@field body_display string
+
+---@field start_line number
+---@field end_line number
+---@field show_icon_line_number number
+
+---@field redirect_response_body_to_files ResponseBodyToFile[]
+
+---@field scripts Scripts
+
+---@field name string|nil -- The name of the request, used for run()
+---@field file string|nil -- The file the request was imported from, used for run()
+
+---@field processed boolean -- Whether the request has been processed, used by replay()
+
+---@alias DocumentVariables table<string, string|number|boolean>
+
+---@class ResponseBodyToFile
+---@field file string -- The file path to write the response body to
+---@field overwrite boolean -- Whether to overwrite the file if it already exists
 
 ---@class Scripts
 ---@field pre_request ScriptData
@@ -13,41 +48,22 @@ local M = {}
 ---@field inline string[]
 ---@field files string[]
 
----@class DocumentRequest
----@field headers table<string, string>
----@field headers_raw table<string, string>
----@field cookie string
----@field metadata table<{name: string, value: string}>
----@field body string
----@field body_display string
----@field start_line number
----@field end_line number
----@field show_icon_line_number number
----@field variables DocumentVariables
----@field redirect_response_body_to_files ResponseBodyToFile[]
----@field scripts Scripts
----@field url string
----@field method string
----@field http_version string
-
----@alias DocumentVariables table<string, string|number|boolean>
-
----@class ResponseBodyToFile
----@field file string -- The file path to write the response body to
----@field overwrite boolean -- Whether to overwrite the file if it already exists
-
 ---@type DocumentRequest
 local default_document_request = {
+  metadata = {},
+  variables = {},
+  method = "",
+  url = "",
+  request_target = nil,
+  http_version = "",
   headers = {},
   headers_raw = {},
   cookie = "",
-  metadata = {},
   body = "",
   body_display = "",
   start_line = 0, -- 1-based
   end_line = 0, -- 1-based
   show_icon_line_number = 1,
-  variables = {},
   redirect_response_body_to_files = {},
   scripts = {
     pre_request = {
@@ -59,13 +75,13 @@ local default_document_request = {
       files = {},
     },
   },
-  url = "",
-  http_version = "",
-  method = "",
+  name = nil,
+  file = nil,
+  processed = false,
 }
 
 local function split_content_by_blocks(lines, line_offset)
-  local new_block = { lines = {}, start_lnum = math.max(1, line_offset), end_lnum = 1 }
+  local new_block = { lines = {}, name = nil, start_lnum = math.max(1, line_offset), end_lnum = 1 }
   local delimiter = "###"
   local blocks = {}
 
@@ -85,6 +101,7 @@ local function split_content_by_blocks(lines, line_offset)
 
       block = vim.deepcopy(new_block)
       block.start_lnum = line_offset + lnum + 1
+      block.name = line:match("^" .. delimiter .. "%s*(.+)$")
     else
       table.insert(block.lines, line)
     end
@@ -228,21 +245,108 @@ local function parse_body(request, line)
   request.body_display = request.body_display .. line .. line_ending
 end
 
--- Request line (e.g., GET http://example.com HTTP/1.1)
--- Split the line into method, URL and HTTP version (optional)
-local function parse_url(line)
-  local method, url, http_version = line:match("^([A-Z]+)%s+(.+)%s+HTTP/(%d[.%d]*)%s*$")
+local function parse_url(request, line)
+  local method, http_version
 
-  if not method then
-    method, url = line:match("^([A-Z]+)%s+(.+)$")
+  method = line:match("^([A-Z]+).+")
+
+  if method then line = line:gsub("^" .. method .. "%s+", "") end
+  if method == "GRPC" then return method, line end
+
+  method = method or "GET"
+
+  http_version = line:match("HTTP/(%d[.%d]*)")
+  if http_version then line = line:gsub("%s*HTTP/" .. http_version .. "%s*", "") end
+
+  if line == "*" then
+    request.request_target = "*"
+    line = ""
   end
 
-  return method, url, http_version
+  return method, line, http_version
+end
+
+local function parse_host(request, line)
+  line = line:gsub("^Host:%s*", "")
+  request.url = line .. request.url
 end
 
 local function parse_request_urL_method(request, line, relative_linenr)
-  request.method, request.url, request.http_version = parse_url(line)
+  request.method, request.url, request.http_version = parse_url(request, line)
+  request.name = request.name or (request.method or "") .. " " .. (request.url or "")
   request.show_icon_line_number = request.start_line + relative_linenr
+end
+
+local function parse_multiline_url(request, line)
+  local path = line:match("^%s*(/%w+)$")
+  if request.url and path then request.url = request.url .. path end
+end
+
+local function import_requests(path, variables, request)
+  path = FS.get_file_path(path, request.file)
+
+  local file = FS.read_file(path)
+  if not file then return Logger.warn("The file '" .. path .. "' was not found. Skipping ...") end
+
+  local r_variables, requests = M.get_document(vim.split(file, "\n"), path)
+  Table.merge("keep", variables, r_variables)
+
+  return requests
+end
+
+local function update_imported_request(request, imported_request, lnum)
+  imported_request.start_line = request.start_line
+  imported_request.end_line = request.end_line
+  imported_request.show_icon_line_number = lnum
+
+  return imported_request
+end
+
+local function run_file(path, variables, requests, request, lnum)
+  local imported_requests = import_requests(path, variables, request)
+
+  imported_requests = vim
+    .iter(imported_requests)
+    :map(function(imported_request)
+      return update_imported_request(request, imported_request, lnum)
+    end)
+    :totable()
+
+  vim.list_extend(requests, imported_requests)
+end
+
+local function run_request(name, variables, requests, request, imported_requests, variables_to_replace, lnum)
+  local imported_request = vim.iter(imported_requests):find(function(imported_request)
+    return imported_request.name == name
+  end)
+
+  if not imported_request then return end
+
+  update_imported_request(request, imported_request, lnum)
+  table.insert(requests, imported_request)
+
+  -- replace variables in the calling request
+  vim.iter(vim.split(variables_to_replace or "", ",%s*")):each(function(variable)
+    parse_variables(variables, variable)
+  end)
+end
+
+local function parse_import_command(variables, request, imported_requests, line)
+  local path = line:match("^import (.+)%s*") or ""
+  if not path:match("%.http$") then return end
+
+  vim.list_extend(imported_requests, import_requests(path, variables, request) or {})
+end
+
+local function parse_run_command(variables, requests, request, imported_requests, line, lnum)
+  local variables_to_replace = line:match("^run .+ %((.+)%)%s*$")
+  if variables_to_replace then line = line:gsub("%s*%(" .. variables_to_replace .. "%)%s*", "") end
+
+  local path = line:gsub("^run ", "")
+
+  _ = path:match("^#")
+    and run_request(path:sub(2), variables, requests, request, imported_requests, variables_to_replace, lnum)
+  _ = path:match("%.http$") and run_file(path, variables, requests, request, lnum)
 end
 
 -- expand path for included files, so can be used in request replay(), when cwd has changed
@@ -261,8 +365,10 @@ M.expand_included_filepath = function(line)
 end
 
 ---Parses the DB.current_buffer document and returns a list of DocumentRequests or nil if no valid requests found
----@return DocumentVariables|nil, DocumentRequest[]|nil
-M.get_document = function()
+---@param lines string[]|nil
+---@param path string|nil
+---@return DocumentVariables|nil, DocumentRequest[]|nil, DocumentRequest[]|nil
+M.get_document = function(lines, path)
   local buf = DB.get_current_buffer()
 
   local content_lines, line_offset = get_visual_selection() -- first: try to get the visual selection
@@ -276,13 +382,14 @@ M.get_document = function()
 
   content_lines = FS.is_non_http_file() and PARSER_UTILS.strip_invalid_chars(content_lines or {}) or content_lines
 
-  content_lines = content_lines or vim.api.nvim_buf_get_lines(buf, 0, -1, false) -- finally: get the whole buffer if the three methods above failed
+  content_lines = lines or content_lines or vim.api.nvim_buf_get_lines(buf, 0, -1, false) -- finally: get the whole buffer if the three methods above failed
   line_offset = line_offset or 0
 
   if not content_lines then return end
 
   local variables = {}
   local requests = {}
+  local imported_requests = {}
   local blocks = split_content_by_blocks(content_lines, line_offset)
 
   for _, block in ipairs(blocks) do
@@ -290,18 +397,25 @@ M.get_document = function()
     local is_prerequest_handler_script_inline = false
     local is_postrequest_handler_script_inline = false
     local is_body_section = false
-    local skip_block = false
 
     local request = vim.deepcopy(default_document_request)
 
     request.start_line = block.start_lnum
     request.end_line = block.end_lnum
+    request.name = block.name
+    request.file = path or vim.fn.fnamemodify(vim.fn.bufname(DB.get_current_buffer()), ":p")
 
     for relative_linenr, line in ipairs(block.lines) do
-      -- skip comments, silently skip URLs that are commented out
-      if line:match("^#%S") then
-        if parse_url(line:sub(2)) then skip_block = true end
+      if line:match("^# @") then
+        parse_metadata(request, line)
+      -- skip comments and silently skip URLs that are commented out
+      elseif line:match("^%s*#") or line:match("^%s*//") then
+        parse_url(request, line:match("^%s*[#/]+%s*(.+)") or "")
       -- end of inline scripting
+      elseif is_request_line and line:match("^import ") then
+        parse_import_command(variables, request, imported_requests, line)
+      elseif is_request_line and line:match("^run ") then
+        parse_run_command(variables, requests, request, imported_requests, line, request.start_line + relative_linenr)
       elseif is_request_line and line:match("^%%}$") then
         is_prerequest_handler_script_inline = false
       -- end of inline scripting
@@ -313,8 +427,6 @@ M.get_document = function()
       -- inline scripting active: add the line to the prerequest handler scripts
       elseif is_prerequest_handler_script_inline then
         table.insert(request.scripts.pre_request.inline, line)
-      elseif line:sub(1, 1) == "#" then
-        parse_metadata(request, line)
       -- we're still in(/before) the request line and we have a pre-request inline handler script
       elseif is_request_line and line:match("^< %{%%$") then
         is_prerequest_handler_script_inline = true
@@ -338,10 +450,16 @@ M.get_document = function()
         parse_variables(variables, line)
       elseif is_body_section then
         parse_body(request, line)
+      elseif not is_request_line and line:match("^%s*/%a+") then
+        parse_multiline_url(request, line)
       elseif not is_request_line and line:match("^%s*[?&]") and #request.headers == 0 and request.url then
         parse_query_params(request, line)
-      elseif not is_request_line and line:match("^([^:]+):%s*(.*)$") then
+      elseif line:match("^Host:") then
+        parse_host(request, line)
+        is_request_line = false
+      elseif line:match("^(.+):%s*(.*)$") and not line:match("://") and not line:match(":%d+") then
         parse_headers(request, line)
+        is_request_line = false
       elseif is_request_line then
         parse_request_urL_method(request, line, relative_linenr)
         is_request_line = false
@@ -355,28 +473,49 @@ M.get_document = function()
 
     if request.url and #request.url > 0 then
       table.insert(requests, request)
-    elseif not skip_block then
-      Logger.warn(("Request without URL found at line: %s. Skipping ..."):format(request.start_line))
+    else
+      -- Logger.warn(("Request without URL found at line: %s. Skipping ..."):format(request.start_line))
     end
   end
 
-  return variables, requests
+  return variables, requests, imported_requests
 end
 
 ---Returns a DocumentRequest within specified line number from a list of DocumentRequests
 ---or returns the first DocumentRequest in the list if no line number is provided
 ---@param requests DocumentRequest[]
 ---@param linenr? number|nil
----@return DocumentRequest|nil
+---@return DocumentRequest[]|nil
 M.get_request_at = function(requests, linenr)
-  if not linenr then return requests[1] end
+  if not linenr then return { requests[1] } end
+  local line = vim.fn.getline(linenr)
 
-  for _, request in ipairs(requests) do
-    if linenr >= request.start_line and linenr <= request.end_line then return request end
+  local request_name = line:match("^run #(.+)$")
+  request_name = request_name and request_name:gsub("%s*%(.+%)%s*$", "")
+
+  local file = line:match("^run (.+%.http)%s*$")
+  file = file and vim.fn.fnamemodify(file, ":t")
+
+  if request_name or file then
+    return vim
+      .iter(requests)
+      :filter(function(request)
+        return (request_name and request.name == request_name)
+          or (file and vim.fn.fnamemodify(request.file, ":t") == file)
+      end)
+      :totable()
   end
+
+  return vim
+    .iter(requests)
+    :filter(function(request)
+      return linenr >= request.start_line and linenr <= request.end_line
+    end)
+    :totable()
 end
 
 M.get_previous_request = function(requests)
+  DB.set_current_buffer()
   local cursor_line = PARSER_UTILS.get_current_line_number()
 
   for i, request in ipairs(requests) do
@@ -385,6 +524,7 @@ M.get_previous_request = function(requests)
 end
 
 M.get_next_request = function(requests)
+  DB.set_current_buffer()
   local cursor_line = PARSER_UTILS.get_current_line_number()
 
   for i, request in ipairs(requests) do
