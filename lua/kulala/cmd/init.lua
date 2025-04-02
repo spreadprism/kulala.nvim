@@ -293,7 +293,6 @@ function process_request(requests, request, variables, callback)
     return process_ws_request(parsed_request, callback)
   end
 
-  if CONFIG.options.debug then vim.print(("Running command: %s"):format(table.concat(parsed_request.cmd, " "))) end
   vim.system(parsed_request.cmd, {
     text = true,
     timeout = CONFIG.get().request_timeout,
